@@ -147,6 +147,8 @@ jobs:
             libxcb-xfixes0-dev \
             libxcb-xkb1 \
             libxcb-xkb-dev \
+            libxcb-xinput0 \
+            libxcb-xinput-dev \
             libxcb-glx0-dev \
             libxcb-util-dev
 
