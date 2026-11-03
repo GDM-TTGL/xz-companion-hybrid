@@ -97,31 +97,111 @@ jobs:
           echo "ANDROID_NDK_HOME=${ANDROID_NDK_HOME}" >> "${GITHUB_ENV}"
           echo "NDK_ROOT=${ANDROID_NDK_HOME}" >> "${GITHUB_ENV}"
 
-      - name: Install system build dependencies and set up buildenv
+      - name: Install system build dependencies and Linux/XCB packages
         run: |
-          echo "===> Instalando dependencias nativas del sistema Linux..."
+          echo "===> Instalando dependencias nativas del sistema Linux y bibliotecas XCB/Qt..."
           sudo apt-get update && sudo apt-get install -y --no-install-recommends \
             ccache \
             cmake \
             ninja-build \
             make \
             build-essential \
-            libasound2-dev \
-            libegl1-mesa-dev \
-            libglu1-mesa-dev \
-            libltdl-dev \
-            libx11-xcb-dev \
-            libxi-dev \
-            libxkbcommon-dev \
-            libxkbcommon-x11-dev \
-            libxrender-dev \
-            linux-libc-dev \
             pkg-config \
             python3-jinja2 \
-            unzip
+            unzip \
+            file \
+            linux-libc-dev \
+            libasound2-dev \
+            libegl1-mesa-dev \
+            libgl1-mesa-dev \
+            libglu1-mesa-dev \
+            libltdl-dev \
+            libfontconfig1-dev \
+            libfreetype6-dev \
+            libx11-dev \
+            libx11-xcb-dev \
+            libxi-dev \
+            libxrender-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-0 \
+            libxkbcommon-x11-dev \
+            libxcb-cursor0 \
+            libxcb-cursor-dev \
+            libxcb-xinerama0 \
+            libxcb-xinerama0-dev \
+            libxcb-icccm4 \
+            libxcb-icccm4-dev \
+            libxcb-image0 \
+            libxcb-image0-dev \
+            libxcb-keysyms1 \
+            libxcb-keysyms1-dev \
+            libxcb-randr0 \
+            libxcb-randr0-dev \
+            libxcb-render-util0 \
+            libxcb-render-util0-dev \
+            libxcb-shape0 \
+            libxcb-shape0-dev \
+            libxcb-sync1 \
+            libxcb-sync-dev \
+            libxcb-xfixes0 \
+            libxcb-xfixes0-dev \
+            libxcb-xkb1 \
+            libxcb-xkb-dev \
+            libxcb-glx0-dev \
+            libxcb-util-dev
 
-          # Sourcing del script oficial de Mixxx para exportar dependencias precompiladas
+          # Exportar variables de entorno de Mixxx buildenv
           source tools/android_buildenv.sh env
+
+      - name: Pre-fetch and extract Mixxx prebuilt buildenv
+        run: |
+          echo "===> Preparando dependencias precompiladas de Mixxx..."
+          source tools/android_buildenv.sh env
+          mkdir -p "${BUILDENV_BASEPATH}"
+          ZIP_FILE="${BUILDENV_BASEPATH}/${BUILDENV_NAME}.zip"
+          EXTRACT_DIR="${BUILDENV_BASEPATH}/${BUILDENV_NAME}"
+
+          if [ ! -d "${EXTRACT_DIR}" ]; then
+            if [ ! -f "${ZIP_FILE}" ]; then
+              echo "Descargando ${BUILDENV_URL}..."
+              curl -fsSL -o "${ZIP_FILE}" "${BUILDENV_URL}"
+            fi
+            echo "Verificando SHA256 del buildenv..."
+            echo "${BUILDENV_SHA256}  ${ZIP_FILE}" | sha256sum -c -
+            echo "Descomprimiendo en ${EXTRACT_DIR}..."
+            unzip -q "${ZIP_FILE}" -d "${BUILDENV_BASEPATH}"
+          fi
+          echo "Buildenv verificado y listo en ${EXTRACT_DIR}."
+
+      - name: Check qmlimportscanner and Qt host tools dependencies with ldd
+        run: |
+          echo "===> Verificando dependencias con ldd para herramientas host de Qt..."
+          source tools/android_buildenv.sh env
+
+          # Localizar ejecutables host de Qt en el buildenv
+          QT_TOOLS=$(find "${BUILDENV_BASEPATH}" -type f \( -name "qmlimportscanner" -o -name "moc" -o -name "rcc" -o -name "qmltyperegistrar" \) 2>/dev/null)
+          echo "Herramientas Qt detectadas:"
+          echo "${QT_TOOLS}"
+
+          MISSING_LIBS=0
+          for tool in ${QT_TOOLS}; do
+            if file "${tool}" | grep -q "ELF 64-bit"; then
+              echo "===================================================="
+              echo "Inspeccionando bibliotecas con ldd para: ${tool}"
+              ldd "${tool}"
+              if ldd "${tool}" | grep -i "not found"; then
+                echo "ALERTA: Dependencias faltantes encontradas en ${tool}!"
+                MISSING_LIBS=$((MISSING_LIBS + 1))
+              fi
+            fi
+          done
+
+          if [ ${MISSING_LIBS} -gt 0 ]; then
+            echo "ERROR: Existen bibliotecas compartidas faltantes para ejecutar las herramientas de Qt."
+            exit 1
+          fi
+
+          echo "OK: Todas las herramientas Qt del host tienen sus dependencias compartidas completas."
 
       - name: Restore ccache
         uses: actions/cache@v4
