@@ -222,9 +222,22 @@ jobs:
             -keyalg RSA -keysize 2048 -validity 10000 \
             -dname "CN=XZ Companion Debug,OU=Testing,O=XZCompanion,C=US"
 
+          echo "===> Verificando presencia del keystore y alias con keytool -list..."
+          keytool -list -v -keystore /home/runner/keystore/xz-debug.keystore -storepass android
+
+          echo "QT_ANDROID_KEYSTORE_PATH=/home/runner/keystore/xz-debug.keystore" >> "${GITHUB_ENV}"
+          echo "QT_ANDROID_KEYSTORE_ALIAS=androiddebugkey" >> "${GITHUB_ENV}"
+          echo "QT_ANDROID_KEYSTORE_STORE_PASS=android" >> "${GITHUB_ENV}"
+          echo "QT_ANDROID_KEYSTORE_KEY_PASS=android" >> "${GITHUB_ENV}"
+
       - name: Configure CMake
         run: |
           echo "===> Configurando CMake para Android ARM64..."
+          export QT_ANDROID_KEYSTORE_PATH=/home/runner/keystore/xz-debug.keystore
+          export QT_ANDROID_KEYSTORE_ALIAS=androiddebugkey
+          export QT_ANDROID_KEYSTORE_STORE_PASS=android
+          export QT_ANDROID_KEYSTORE_KEY_PASS=android
+
           mkdir -p build
           cd build
           cmake \
@@ -260,6 +273,11 @@ jobs:
       - name: Build Mixxx Android target (APK)
         run: |
           set -o pipefail
+          export QT_ANDROID_KEYSTORE_PATH=/home/runner/keystore/xz-debug.keystore
+          export QT_ANDROID_KEYSTORE_ALIAS=androiddebugkey
+          export QT_ANDROID_KEYSTORE_STORE_PASS=android
+          export QT_ANDROID_KEYSTORE_KEY_PASS=android
+
           echo "===> Compilando Mixxx..."
           cd build
           cmake --build . --config RelWithDebInfo --parallel "$(nproc)" 2>&1 | tee build_output.log
@@ -276,34 +294,22 @@ jobs:
             cmake --build . --target mixxx_apk 2>&1 | tee -a build_output.log
           fi
 
-          # Fallback de seguridad con androiddeployqt si el APK no se generó por target directo
-          if ! find . -name "*.apk" -type f | grep -q "apk"; then
-            echo "Buscando archivo de configuracion de deployment para androiddeployqt..."
-            DEPLOY_SETTINGS=$(find . -name "*deployment-settings*.json" | head -n 1)
-            ANDROIDDEPLOYQT=$(find "${BUILDENV_BASEPATH}" /usr -name androiddeployqt -type f 2>/dev/null | head -n 1)
-            if [ -n "$DEPLOY_SETTINGS" ] && [ -n "$ANDROIDDEPLOYQT" ]; then
-              echo "Ejecutando androiddeployqt manualmente con ${DEPLOY_SETTINGS}..."
-              "$ANDROIDDEPLOYQT" --input "$DEPLOY_SETTINGS" --output ./android-build --gradle 2>&1 | tee -a build_output.log || true
-            fi
-          fi
-
       - name: Package and sign APK
         if: success()
         run: |
+          set -o pipefail
           echo "===> Verificando APK generado..."
           mkdir -p artifacts
 
-          # Buscar APKs generados
           FOUND_APKS=$(find build -name "*.apk" -type f)
           echo "APKs encontrados en el árbol de compilación:"
           echo "${FOUND_APKS}"
 
           if [ -z "${FOUND_APKS}" ]; then
-            echo "ERROR: No se encontró ningún APK tras la compilación."
+            echo "ERROR: No se encontró ningún APK tras la compilación y empaquetado."
             exit 1
           fi
 
-          # Tomar el APK final (release o debug)
           TARGET_APK=""
           for apk in ${FOUND_APKS}; do
             if [[ "$apk" == *"android-build"* ]]; then
@@ -317,16 +323,17 @@ jobs:
 
           echo "Procesando APK objetivo: ${TARGET_APK}"
 
-          # Comprobar firma con apksigner
           APKSIGNER=$(find "${ANDROID_HOME}/build-tools/35.0.0" -name apksigner | head -n 1)
           ZIPALIGN=$(find "${ANDROID_HOME}/build-tools/35.0.0" -name zipalign | head -n 1)
-
           FINAL_APK="artifacts/XZCompanion-Hybrid-v0.1-arm64-v8a.apk"
-          cp "${TARGET_APK}" "${FINAL_APK}"
 
-          if ! ${APKSIGNER} verify "${FINAL_APK}" 2>/dev/null; then
-            echo "APK no firmado detectado. Firmando con apksigner y debug keystore..."
-            ${ZIPALIGN} -v -p 4 "${TARGET_APK}" artifacts/aligned.apk || cp "${TARGET_APK}" artifacts/aligned.apk
+          # Verificar si Qt/androiddeployqt ya generó un APK firmado válido
+          if ${APKSIGNER} verify "${TARGET_APK}" >/dev/null 2>&1; then
+            echo "El APK ya fue firmado válidamente por Qt/androiddeployqt."
+            cp "${TARGET_APK}" "${FINAL_APK}"
+          else
+            echo "El APK no está firmado por Qt. Procediendo a alinear y firmar con apksigner..."
+            ${ZIPALIGN} -v -p 4 "${TARGET_APK}" artifacts/aligned.apk
             ${APKSIGNER} sign --ks /home/runner/keystore/xz-debug.keystore \
               --ks-pass pass:android --key-pass pass:android \
               --ks-key-alias androiddebugkey \
@@ -334,7 +341,7 @@ jobs:
             rm -f artifacts/aligned.apk
           fi
 
-          echo "Verificando firma final de ${FINAL_APK}:"
+          echo "Verificando firma final de ${FINAL_APK}..."
           ${APKSIGNER} verify --verbose "${FINAL_APK}"
 
           ls -lh artifacts/
