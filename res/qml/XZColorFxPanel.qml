@@ -30,6 +30,9 @@ Rectangle {
             Repeater {
                 model: ["FILTER", "SPACE", "DUB ECHO", "SWEEP", "NOISE", "CRUSH"]
                 delegate: Skin.ControlButton {
+                    required property int index
+                    required property string modelData
+
                     width: index === 2 ? 83 : 70
                     height: 35
                     text: modelData
