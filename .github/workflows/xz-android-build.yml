@@ -276,6 +276,17 @@ jobs:
             cmake --build . --target mixxx_apk 2>&1 | tee -a build_output.log
           fi
 
+          # Fallback de seguridad con androiddeployqt si el APK no se generó por target directo
+          if ! find . -name "*.apk" -type f | grep -q "apk"; then
+            echo "Buscando archivo de configuracion de deployment para androiddeployqt..."
+            DEPLOY_SETTINGS=$(find . -name "*deployment-settings*.json" | head -n 1)
+            ANDROIDDEPLOYQT=$(find "${BUILDENV_BASEPATH}" /usr -name androiddeployqt -type f 2>/dev/null | head -n 1)
+            if [ -n "$DEPLOY_SETTINGS" ] && [ -n "$ANDROIDDEPLOYQT" ]; then
+              echo "Ejecutando androiddeployqt manualmente con ${DEPLOY_SETTINGS}..."
+              "$ANDROIDDEPLOYQT" --input "$DEPLOY_SETTINGS" --output ./android-build --gradle 2>&1 | tee -a build_output.log || true
+            fi
+          fi
+
       - name: Package and sign APK
         if: success()
         run: |
