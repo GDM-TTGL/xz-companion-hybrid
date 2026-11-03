@@ -18,4 +18,10 @@ assert 'model: ["FILTER", "SPACE", "DUB ECHO", "SWEEP", "NOISE", "CRUSH"]' in pa
 assert (root/'third_party/VynixDJ_skin/LICENSE').exists()
 xml=list((root/'third_party/VynixDJ_skin').rglob('*.xml'))
 for f in xml: ET.parse(f)
+# QML required properties check for Knob / ControlKnob
+knob_qml=(root/'res/qml/Knob.qml').read_text(encoding='utf8')
+assert 'required property color color' in knob_qml, "Knob.qml must retain required property color"
+assert panel.count('Skin.ControlKnob') == 2, "XZColorFxPanel must instantiate 2 ControlKnobs (CH1 and CH2)"
+assert panel.count('color: "#fb477d"') >= 2, "XZColorFxPanel ControlKnobs must have required color property initialized"
+
 print(f'OK: static checks passed; {len(xml)} Vynix XML files parsed. Native compilation NOT performed.')

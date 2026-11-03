@@ -44,9 +44,9 @@ Rectangle {
         Row {
             spacing: 8
             Text { text: "CH1"; width: 36; anchors.verticalCenter: parent.verticalCenter; color: "#dce7ff" }
-            Skin.ControlKnob { group: "[QuickEffectRack1_[Channel1]]"; key: "super1"; width: 40; height: 40 }
+            Skin.ControlKnob { group: "[QuickEffectRack1_[Channel1]]"; key: "super1"; color: "#fb477d"; width: 40; height: 40 }
             Text { text: "CH2"; width: 36; anchors.verticalCenter: parent.verticalCenter; color: "#dce7ff" }
-            Skin.ControlKnob { group: "[QuickEffectRack1_[Channel2]]"; key: "super1"; width: 40; height: 40 }
+            Skin.ControlKnob { group: "[QuickEffectRack1_[Channel2]]"; key: "super1"; color: "#fb477d"; width: 40; height: 40 }
             Text { text: "FX seleccionado en ambos decks; cada knob controla su canal"; color: "#b8c6d9"; font.pixelSize: 10; anchors.verticalCenter: parent.verticalCenter }
         }
     }
