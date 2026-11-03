@@ -1,0 +1,244 @@
+<!--
+  The Overview panel to the right of the waveforms. Two pages behind an
+  FX / KEY tab bar, so both control sets get the full panel instead of
+  sharing it:
+
+  FX  — single-column BeatFX (templates/beatfx_unit.xml) for
+        [EffectRack1_EffectUnit1], or with [Skin],dual_fx both units
+        stacked (templates/beatfx_unit_compact.xml).
+
+  KEY — one stacked block per deck (deck 1 top, deck 2 bottom) with the
+        current key, +/-1 and +/-2 semitone nudges, and a reset (see
+        templates/keyfx_deck_row.xml).
+
+  GRID— the beat grid editor for one deck at a time, picked by the 1 / 2
+        tabs on the page itself (see templates/grid_deck_page.xml). One
+        deck at a time because the editor needs full-width buttons: two
+        decks of nudge / set / BPM / scale controls do not fit this
+        panel at a touchable size, and a grid is corrected for the deck
+        you are cueing, not for both at once.
+
+  [FxPanel],current selects the page; [FxPanel],fx / [FxPanel],key /
+  [FxPanel],grid are the per-page triggers the tab buttons write, and
+  [Skin],grid_deck / grid_deck1 / grid_deck2 do the same for the deck
+  inside the GRID page. All are created by the skin parser. None are
+  persisted — the panel opens on FX, on deck 1, every launch.
+-->
+<Template>
+  <WidgetGroup>
+    <ObjectName>BeatFX_Container</ObjectName>
+    <Layout>vertical</Layout>
+    <Size>180max,0me</Size>
+    <Children>
+
+      <WidgetGroup>
+        <ObjectName>FxPanel_TabBar</ObjectName>
+        <Layout>horizontal</Layout>
+        <Size>0me,36f</Size>
+        <Children>
+          <!-- Select-only, not toggles: always emit 1 on press (never 0),
+               so tapping the already-active tab is a no-op. -->
+          <PushButton>
+            <ObjectName>FxPanel_TabFx</ObjectName>
+            <Size>0me,36f</Size>
+            <NumberStates>2</NumberStates>
+            <State>
+              <Number>0</Number>
+              <Text>FX</Text>
+            </State>
+            <State>
+              <Number>1</Number>
+              <Text>FX</Text>
+            </State>
+            <LeftClickIsPushButton>true</LeftClickIsPushButton>
+            <Connection>
+              <ConfigKey>[FxPanel],fx</ConfigKey>
+              <EmitOnDownPress>true</EmitOnDownPress>
+            </Connection>
+          </PushButton>
+          <PushButton>
+            <ObjectName>FxPanel_TabKey</ObjectName>
+            <Size>0me,36f</Size>
+            <NumberStates>2</NumberStates>
+            <State>
+              <Number>0</Number>
+              <Text>Key</Text>
+            </State>
+            <State>
+              <Number>1</Number>
+              <Text>Key</Text>
+            </State>
+            <LeftClickIsPushButton>true</LeftClickIsPushButton>
+            <Connection>
+              <ConfigKey>[FxPanel],key</ConfigKey>
+              <EmitOnDownPress>true</EmitOnDownPress>
+            </Connection>
+          </PushButton>
+          <PushButton>
+            <ObjectName>FxPanel_TabGrid</ObjectName>
+            <Size>0me,36f</Size>
+            <NumberStates>2</NumberStates>
+            <State>
+              <Number>0</Number>
+              <Text>Grid</Text>
+            </State>
+            <State>
+              <Number>1</Number>
+              <Text>Grid</Text>
+            </State>
+            <LeftClickIsPushButton>true</LeftClickIsPushButton>
+            <Connection>
+              <ConfigKey>[FxPanel],grid</ConfigKey>
+              <EmitOnDownPress>true</EmitOnDownPress>
+            </Connection>
+          </PushButton>
+        </Children>
+      </WidgetGroup>
+
+      <!--
+        Ignored vertical policy on purpose. WWidgetStack forwards its
+        minimumSizeHint to the *current* page, so pages of unequal height
+        re-drive the Overview's vertical layout on every switch: the FX page
+        (its header + a parameter row) asks for more than KEY, which stole
+        ~5px off the deck strip and made the bottom of the screen jump
+        between FX and KEY — and again whenever an effect with a bucket row
+        was loaded. Ignored drops the stack out of the minimum-height
+        calculation, so this 180px side panel is sized purely by the
+        waveform column beside it. Pages are AlignTop, so content that
+        outgrows the panel packs from the top instead of shoving the rest of
+        the layout around.
+      -->
+      <WidgetStack currentpage="[FxPanel],current">
+        <ObjectName>FxPanel_Stack</ObjectName>
+        <SizePolicy>me,i</SizePolicy>
+        <Children>
+
+          <WidgetGroup trigger="[FxPanel],fx">
+            <ObjectName>FxPanel_Page</ObjectName>
+            <Layout>vertical</Layout>
+            <SizePolicy>me,me</SizePolicy>
+            <Children>
+              <!-- One FX: unit 1 with its parameter list. Two FX
+                   ([Skin],dual_fx): both units stacked, compact. -->
+              <WidgetGroup>
+                <ObjectName>BeatFX_UnitWrapper</ObjectName>
+                <Layout>vertical</Layout>
+                <SizePolicy>me,me</SizePolicy>
+                <Children>
+                  <Template src="skin:templates/beatfx_unit.xml">
+                    <SetVariable name="unit">1</SetVariable>
+                    <SetVariable name="prefix">fx</SetVariable>
+                  </Template>
+                </Children>
+                <Connection>
+                  <ConfigKey>[Skin],dual_fx</ConfigKey>
+                  <BindProperty>visible</BindProperty>
+                  <Transform><Not/></Transform>
+                </Connection>
+              </WidgetGroup>
+              <WidgetGroup>
+                <ObjectName>BeatFX_UnitWrapper</ObjectName>
+                <Layout>vertical</Layout>
+                <SizePolicy>me,me</SizePolicy>
+                <Children>
+                  <!-- Unit 1 next to the deck 1 waveform, unit 2 next to
+                       the deck 2 waveform. pad makes up for the 36px tab bar
+                       plus its 6px margin and for the 24px spacing between
+                       the units (the gap between the waveforms), measured on
+                       the device; see beatfx_unit_compact.xml. -->
+                  <Template src="skin:templates/beatfx_unit_compact.xml">
+                    <SetVariable name="unit">1</SetVariable>
+                    <SetVariable name="prefix">fx</SetVariable>
+                    <SetVariable name="pad">0</SetVariable>
+                  </Template>
+                  <Template src="skin:templates/beatfx_unit_compact.xml">
+                    <SetVariable name="unit">2</SetVariable>
+                    <SetVariable name="prefix">fx2</SetVariable>
+                    <SetVariable name="pad">58</SetVariable>
+                  </Template>
+                </Children>
+                <Connection>
+                  <ConfigKey>[Skin],dual_fx</ConfigKey>
+                  <BindProperty>visible</BindProperty>
+                </Connection>
+              </WidgetGroup>
+            </Children>
+          </WidgetGroup>
+
+          <!--
+            KEY page: one block per deck, stacked. No shared "selected deck"
+            state exists in this skin, so each block targets its own
+            [ChannelN] controls.
+          -->
+          <WidgetGroup trigger="[FxPanel],key">
+            <ObjectName>FxPanel_Page</ObjectName>
+            <Layout>vertical</Layout>
+            <SizePolicy>me,me</SizePolicy>
+            <Children>
+
+              <Template src="skin:templates/keyfx_deck_row.xml">
+                <SetVariable name="channel">1</SetVariable>
+              </Template>
+              <Template src="skin:templates/keyfx_deck_row.xml">
+                <SetVariable name="channel">2</SetVariable>
+              </Template>
+
+              <WidgetGroup>
+                <ObjectName>BeatFX_Spacer</ObjectName>
+                <Size>0me,0me</Size>
+              </WidgetGroup>
+
+            </Children>
+          </WidgetGroup>
+
+          <!--
+            GRID — beat grid editor. One page per deck behind the 1 / 2 tabs
+            the pages carry themselves, so the deck bar reads as one strip
+            while the stack swaps under it. Both pages are the same size, so
+            switching decks does not resize the panel.
+          -->
+          <WidgetGroup trigger="[FxPanel],grid">
+            <ObjectName>FxPanel_Page</ObjectName>
+            <Layout>vertical</Layout>
+            <SizePolicy>me,me</SizePolicy>
+            <Children>
+
+              <WidgetStack currentpage="[Skin],grid_deck">
+                <ObjectName>Grid_DeckStack</ObjectName>
+                <SizePolicy>me,me</SizePolicy>
+                <Children>
+                  <WidgetGroup trigger="[Skin],grid_deck1">
+                    <Layout>vertical</Layout>
+                    <SizePolicy>me,me</SizePolicy>
+                    <Children>
+                      <Template src="skin:templates/grid_deck_page.xml">
+                        <SetVariable name="channel">1</SetVariable>
+                      </Template>
+                    </Children>
+                  </WidgetGroup>
+                  <WidgetGroup trigger="[Skin],grid_deck2">
+                    <Layout>vertical</Layout>
+                    <SizePolicy>me,me</SizePolicy>
+                    <Children>
+                      <Template src="skin:templates/grid_deck_page.xml">
+                        <SetVariable name="channel">2</SetVariable>
+                      </Template>
+                    </Children>
+                  </WidgetGroup>
+                </Children>
+              </WidgetStack>
+
+              <WidgetGroup>
+                <ObjectName>BeatFX_Spacer</ObjectName>
+                <Size>0me,0me</Size>
+              </WidgetGroup>
+
+            </Children>
+          </WidgetGroup>
+
+        </Children>
+      </WidgetStack>
+
+    </Children>
+  </WidgetGroup>
+</Template>

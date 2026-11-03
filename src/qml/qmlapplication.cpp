@@ -1,0 +1,668 @@
+#include "qmlapplication.h"
+
+#include <QCoreApplication>
+#include <QEventLoop>
+#include <QLocale>
+#include <QMessageBox>
+#include <QMetaEnum>
+#include <QQmlEngineExtensionPlugin>
+#include <QQmlError>
+#include <QQuickStyle>
+#include <QQuickWindow>
+#include <QTextDocument>
+#include <memory>
+#include <utility>
+
+#include "control/control.h"
+#include "effects/backends/builtin/bitcrushereffect.h"
+#include "effects/backends/builtin/echoeffect.h"
+#include "effects/backends/builtin/filtereffect.h"
+#include "effects/backends/builtin/moogladder4filtereffect.h"
+#include "effects/backends/builtin/reverbeffect.h"
+#include "effects/backends/builtin/whitenoiseeffect.h"
+#include "effects/backends/effectsbackendmanager.h"
+#include "effects/chains/quickeffectchain.h"
+#include "effects/effectparameterslotbase.h"
+#include "effects/effectslot.h"
+#include "effects/effectsmanager.h"
+#include "control/controlproxy.h"
+#include "control/controlpushbutton.h"
+#include "controllers/controllermanager.h"
+#include "controllers/keyboard/keyboardeventfilter.h"
+#include "mixer/playermanager.h"
+#include "moc_qmlapplication.cpp"
+#include "preferences/configobject.h"
+#include "qml/asyncimageprovider.h"
+#include "qml/qmlapplicationproxy.h"
+#include "qml/qmlconfigproxy.h"
+#include "qml/qmlcoreservices.h"
+#include "qml/qmldlgpreferencesproxy.h"
+#include "qml/qmlrecordingproxy.h"
+#include "soundio/soundmanager.h"
+#include "util/versionstore.h"
+#include "waveform/guitick.h"
+#include "waveform/overviewtype.h"
+#include "waveform/visualsmanager.h"
+#include "waveform/waveformwidgetfactory.h"
+#if defined(Q_OS_ANDROID)
+#include <android/api-level.h>
+#include <android/log.h>
+#include <android/performance_hint.h>
+#include <dlfcn.h>
+
+#include <QDir>
+#include <QFile>
+#include <QJniObject>
+
+#include "util/androidpermissions.h"
+#endif
+
+Q_IMPORT_QML_PLUGIN(MixxxPlugin)
+Q_IMPORT_QML_PLUGIN(Mixxx_ControlsPlugin)
+
+namespace {
+const QString kMainQmlFileName = QStringLiteral("qml/main.qml");
+
+QString normalizedColorScheme(const QString& colorScheme) {
+    if (colorScheme.compare(QStringLiteral("Classic"), Qt::CaseInsensitive) == 0) {
+        return QStringLiteral("Classic");
+    }
+    return QStringLiteral("PaleMoon");
+}
+
+// Converts a (capturing) lambda into a function pointer that can be passed to
+// qmlRegisterSingletonType.
+template<class F>
+auto lambda_to_singleton_type_factory_ptr(F&& f) {
+    static F fn = std::forward<F>(f);
+    return [](QQmlEngine* pEngine, QJSEngine* pScriptEngine) -> QObject* {
+        return fn(pEngine, pScriptEngine);
+    };
+}
+#if defined(Q_OS_ANDROID)
+using PFN_APerformanceHint_getManager = APerformanceHintManager* (*)();
+using PFN_APerformanceHint_createSession = APerformanceHintSession* (*)(
+        APerformanceHintManager*, const int32_t*, size_t, int64_t);
+using PFN_APerformanceHint_setPreferPowerEfficiency = int (*)(
+        APerformanceHintSession*, bool);
+using PFN_APerformanceHint_reportActualWorkDuration = int (*)(
+        APerformanceHintSession*, int64_t);
+
+static PFN_APerformanceHint_reportActualWorkDuration s_pfnReportActualWorkDuration = nullptr;
+
+// Directories under res/qml/ that are compiled into the binary as QML modules
+// and should not be copied to external storage.
+const QStringList kSkipQmlDirs = {
+        QStringLiteral("Mixxx"),
+};
+
+bool canWriteToExternalStorage() {
+    // API 30+ (Android 11+) requires MANAGE_EXTERNAL_STORAGE, below that
+    // WRITE_EXTERNAL_STORAGE, which is a runtime permission since API 23.
+    return mixxx::android::hasFullExternalStorageAccess();
+}
+
+void copyAssetDir(const QString& src, const QString& dst) {
+    QDir().mkpath(dst);
+
+    QDir srcDir(src);
+    const QStringList files = srcDir.entryList(QDir::Files);
+    for (const QString& file : files) {
+        QFile srcFile(srcDir.absoluteFilePath(file));
+        QFile dstFile(dst + '/' + file);
+        if (srcFile.open(QIODevice::ReadOnly) && dstFile.open(QIODevice::WriteOnly)) {
+            dstFile.write(srcFile.readAll());
+        }
+    }
+
+    const QStringList dirs = srcDir.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+    for (const QString& dir : dirs) {
+        if (kSkipQmlDirs.contains(dir)) {
+            continue;
+        }
+        copyAssetDir(src + '/' + dir, dst + '/' + dir);
+    }
+}
+#endif
+} // namespace
+
+namespace mixxx {
+namespace qml {
+
+QmlApplication::QmlApplication(
+        QApplication* app,
+        std::shared_ptr<CoreServices> pCoreServices,
+        const QString& mainQmlFilePath)
+        : m_pCoreServices(std::move(pCoreServices)),
+          m_visualsManager(std::make_unique<VisualsManager>()),
+          m_pGuiTick(std::make_unique<GuiTick>()),
+          m_mainFilePath(mainQmlFilePath.isEmpty()
+                          ? m_pCoreServices->getSettings()->getResourcePath() + kMainQmlFileName
+                          : mainQmlFilePath),
+          m_pAppEngine(nullptr),
+          m_loadSucceeded(false),
+#if defined(Q_OS_ANDROID)
+          m_perfSession(nullptr),
+#endif
+          m_autoReload() {
+#ifdef MIXXX_USE_QML
+    WaveformWidgetFactory::setQmlMode(true);
+#endif
+    QQuickStyle::setStyle("Basic");
+
+#if defined(Q_OS_ANDROID)
+    if (canWriteToExternalStorage()) {
+        const QString externalQmlDir = QStringLiteral("/storage/emulated/0/Mixxx/qml");
+        copyAssetDir(QStringLiteral("assets:/qml"), externalQmlDir);
+        m_mainFilePath = externalQmlDir + QStringLiteral("/main.qml");
+    }
+#endif
+
+    const QString colorScheme = m_pCoreServices->getSettings()->getValueString(
+            ConfigKey("[Config]", "Scheme"));
+    QJSEngine::setObjectOwnership(QmlCoreServices::createInstance(
+                                          normalizedColorScheme(colorScheme), this),
+            QJSEngine::CppOwnership);
+    QmlApplicationProxy::registerVinylControlManager(
+            m_pCoreServices->getVinylControlManager().get());
+
+    const ConfigKey overviewTypeKey(
+            QStringLiteral("[Waveform]"),
+            QStringLiteral("WaveformOverviewType"));
+    m_pWaveformOverviewType = std::make_unique<ControlPushButton>(overviewTypeKey);
+    m_pWaveformOverviewType->setStates(QMetaEnum::fromType<mixxx::OverviewType>().keyCount());
+    m_pWaveformOverviewType->setReadOnly();
+    const auto overviewType = m_pCoreServices->getSettings()->getValue<mixxx::OverviewType>(
+            overviewTypeKey,
+            mixxx::OverviewType::RGB);
+    m_pWaveformOverviewType->forceSet(static_cast<double>(overviewType));
+
+    m_loadSucceeded = loadQml(m_mainFilePath);
+    if (!m_loadSucceeded) {
+        return;
+    }
+
+    QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+    connect(m_pCoreServices.get(),
+            &CoreServices::initializationProgressUpdate,
+            QmlCoreServices::instance(),
+            &QmlCoreServices::setInitializationProgress);
+
+    m_pCoreServices->initialize(app);
+    setupXZColorFx();
+    app->installEventFilter(m_pCoreServices->getKeyboardEventFilter().get());
+    registerImageProvider();
+
+    if (!WaveformWidgetFactory::isCreated()) {
+        WaveformWidgetFactory::createInstance();
+        m_ownsWaveformWidgetFactory = true;
+    }
+    WaveformWidgetFactory::instance()->setConfig(m_pCoreServices->getSettings());
+
+    QString configVersion = m_pCoreServices->getSettings()->getValue(
+            ConfigKey("[Config]", "Version"), "");
+
+    // The risk check guards against Mixxx 3.0 potentially running different
+    // database upgrade paths that could corrupt 2.x profiles.
+    //
+    // When a QML skin is auto-detected from preferences (--developer, no
+    // --new-ui), the underlying binary and DB schema are identical to a
+    // normal 2.x launch — there is no data corruption risk. Skip the gate.
+    //
+    // When explicitly launched with --new-ui, the full 3.0 application path
+    // is taken and the gate remains in effect as designed.
+    const bool viaNewUiFlag = CmdlineArgs::Instance().isQml();
+
+    if (configVersion == VersionStore::FUTURE_UNSTABLE) {
+        qDebug() << "Generating a new user profile for safe testing with unstable code";
+    } else if (!viaNewUiFlag) {
+        qDebug() << "QmlApplication: QML skin loaded via preferences, "
+                    "skipping data-corruption risk check (2.x profile is safe)";
+    } else if (CmdlineArgs::Instance().isAwareOfRisk()) {
+        qCritical() << "Existing user profile detected from" << configVersion
+                    << "but you said you wanted to play with fire!";
+        m_pCoreServices->getSettings()->setValue(
+                ConfigKey("[Config]", "did_run_with_unstable"), true);
+    } else {
+        QMessageBox msgBox;
+        msgBox.setIcon(QMessageBox::Critical);
+        msgBox.setWindowTitle(tr("Existing user profile detected"));
+        msgBox.setText(
+                tr("Trying to run Mixxx 3.0 with an existing %0 user profile! "
+                   "<br><br>There is <b>serious risks</b> of data loss and "
+                   "corruption.<br>We recommend using a test profile folder "
+                   "with the '--settings-path' argument. <br><br>If you want "
+                   "to continue at your own risk, run Mixxx with the argument "
+                   "'--allow-dangerous-data-corruption-risk'.")
+                        .arg(configVersion));
+
+        QPushButton* continueButton =
+                msgBox.addButton(tr("Ok"), QMessageBox::ActionRole);
+        msgBox.exec();
+        m_xzColorFxControls.clear();
+    m_pCoreServices.reset();
+        exit(-1);
+    }
+
+    SoundDeviceStatus result = m_pCoreServices->getSoundManager()->setupDevices();
+    if (result != SoundDeviceStatus::Ok) {
+        const int reInt = static_cast<int>(result);
+        qCritical() << "Error setting up sound devices:" << reInt;
+#ifndef Q_OS_ANDROID
+        exit(reInt);
+#endif
+    }
+
+    setupSpinnyCoverControls();
+
+    // FIXME: DlgPreferences has some initialization logic that must be executed
+    // before the GUI is shown, at least for the effects system.
+    std::shared_ptr<QDialog> pDlgPreferences =
+            m_pCoreServices->makeDlgPreferences();
+    // Without this, QApplication will quit when the last QWidget QWindow is
+    // closed because it does not take into account the window created by
+    // the QQmlApplicationEngine.
+    pDlgPreferences->setAttribute(Qt::WA_QuitOnClose, false);
+
+    auto inputWarningVisible = std::make_shared<bool>(false);
+    auto showNoInputConfiguredWarning =
+            [pDlgPreferences, inputWarningVisible](const QString& message) {
+                if (*inputWarningVisible) {
+                    return;
+                }
+                *inputWarningVisible = true;
+
+                QMessageBox msgBox(QMessageBox::Warning,
+                        VersionStore::applicationName(),
+                        message,
+                        QMessageBox::Ok | QMessageBox::Cancel);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 6, 0)
+                msgBox.setOption(QMessageBox::Option::DontUseNativeDialog);
+#endif
+                msgBox.setWindowModality(Qt::ApplicationModal);
+                msgBox.setDefaultButton(QMessageBox::Cancel);
+                msgBox.exec();
+
+                const bool accepted = msgBox.clickedButton() == msgBox.button(QMessageBox::Ok);
+                *inputWarningVisible = false;
+                if (accepted) {
+                    pDlgPreferences->show();
+                    if (!QMetaObject::invokeMethod(pDlgPreferences.get(),
+                                "showSoundHardwareInputPage",
+                                Qt::DirectConnection)) {
+                        qWarning() << "QML input warning could not open Sound Hardware preferences";
+                    }
+                    pDlgPreferences->raise();
+                    pDlgPreferences->activateWindow();
+                }
+            };
+
+    connect(m_pCoreServices->getPlayerManager().get(),
+            &PlayerManager::noDeckPassthroughInputConfigured,
+            this,
+            [showNoInputConfiguredWarning]() {
+                showNoInputConfiguredWarning(
+                        tr("There is no input device selected for this "
+                           "passthrough control.\n"
+                           "Please select an input device in the sound "
+                           "hardware preferences first."));
+            });
+    connect(m_pCoreServices->getPlayerManager().get(),
+            &PlayerManager::noVinylControlInputConfigured,
+            this,
+            [showNoInputConfiguredWarning]() {
+                showNoInputConfiguredWarning(
+                        tr("There is no input device selected for this vinyl "
+                           "control.\n"
+                           "Please select an input device in the sound "
+                           "hardware preferences first."));
+            });
+    connect(m_pCoreServices->getPlayerManager().get(),
+            &PlayerManager::noMicrophoneInputConfigured,
+            this,
+            [showNoInputConfiguredWarning]() {
+                showNoInputConfiguredWarning(
+                        tr("There is no input device selected for this microphone.\n"
+                           "Do you want to select an input device?"));
+            });
+    connect(m_pCoreServices->getPlayerManager().get(),
+            &PlayerManager::noAuxiliaryInputConfigured,
+            this,
+            [showNoInputConfiguredWarning]() {
+                showNoInputConfiguredWarning(
+                        tr("There is no input device selected for this auxiliary.\n"
+                           "Do you want to select an input device?"));
+            });
+
+    // Since DlgPreferences is only meant to be used in the main QML engine, it
+    // follows a strict singleton pattern design
+    QmlDlgPreferencesProxy::s_pInstance =
+            std::make_unique<QmlDlgPreferencesProxy>(pDlgPreferences, this);
+    QmlRecordingProxy::s_pRecordingManager = m_pCoreServices->getRecordingManager();
+    QmlApplicationProxy::registerReloadCallback([this]() {
+        QTimer::singleShot(0, this, [this]() {
+            loadQml(m_mainFilePath);
+        });
+    });
+
+    const QStringList visualGroups =
+            m_pCoreServices->getPlayerManager()->getVisualPlayerGroups();
+    for (const QString& group : visualGroups) {
+        m_visualsManager->addDeck(group);
+    }
+
+    m_pCoreServices->getPlayerManager()->connect(
+            m_pCoreServices->getPlayerManager().get(),
+            &PlayerManager::numberOfDecksChanged,
+            this,
+            [this](int decks) {
+                for (int i = 0; i < decks; ++i) {
+                    QString group = PlayerManager::groupForDeck(i);
+                    m_visualsManager->addDeckIfNotExist(group);
+                }
+            });
+
+    connect(&m_guiTickTimer, &QTimer::timeout, this, [this]() {
+        m_visualsManager->process(
+                WaveformWidgetFactory::instance()->getEndOfTrackWarningTime());
+        m_pGuiTick->process();
+    });
+    m_guiTickTimer.start(std::chrono::milliseconds(16));
+
+    m_pCoreServices->getControllerManager()->setUpDevices();
+
+    QmlCoreServices::instance()->setInitializationProgress(65, tr("skin"));
+    QmlCoreServices::instance()->setReady();
+
+    connect(&m_autoReload,
+            &QmlAutoReload::triggered,
+            this,
+            [this]() {
+                if (!loadQml(m_mainFilePath)) {
+                    qWarning() << "Auto-reload failed to load QML. Exiting.";
+                    QCoreApplication::exit(-1);
+                }
+            });
+
+#if defined(Q_OS_ANDROID)
+    auto pfnGetManager = reinterpret_cast<PFN_APerformanceHint_getManager>(
+            dlsym(RTLD_DEFAULT, "APerformanceHint_getManager"));
+    auto pfnCreateSession = reinterpret_cast<PFN_APerformanceHint_createSession>(
+            dlsym(RTLD_DEFAULT, "APerformanceHint_createSession"));
+    auto pfnSetPreferPowerEfficiency = reinterpret_cast<PFN_APerformanceHint_setPreferPowerEfficiency>(
+            dlsym(RTLD_DEFAULT, "APerformanceHint_setPreferPowerEfficiency"));
+    s_pfnReportActualWorkDuration = reinterpret_cast<PFN_APerformanceHint_reportActualWorkDuration>(
+            dlsym(RTLD_DEFAULT, "APerformanceHint_reportActualWorkDuration"));
+
+    if (pfnGetManager && pfnCreateSession) {
+        APerformanceHintManager* manager = pfnGetManager();
+        if (manager) {
+            int32_t thread32 = gettid();
+            m_perfSession = pfnCreateSession(manager, &thread32, 1, 1e9 / 60);
+            if (m_perfSession) {
+                if (pfnSetPreferPowerEfficiency) {
+                    pfnSetPreferPowerEfficiency(m_perfSession, false);
+                }
+                __android_log_print(ANDROID_LOG_VERBOSE, "mixxx", "ADPF session ready");
+            } else {
+                __android_log_print(ANDROID_LOG_WARN, "mixxx", "unable to create a ADPF session!");
+            }
+        }
+    }
+#endif
+}
+
+void QmlApplication::slotWindowChanged(QQuickWindow* window) {
+    if (window) {
+        connect(window,
+                &QQuickWindow::afterFrameEnd,
+                this,
+                &QmlApplication::slotFrameSwapped,
+                Qt::UniqueConnection);
+    }
+#if defined(Q_OS_ANDROID)
+    m_frameTimer.restart();
+#endif
+}
+
+void QmlApplication::slotFrameSwapped() {
+#ifdef MIXXX_USE_QML
+    if (WaveformWidgetFactory::isCreated() &&
+            WaveformWidgetFactory::instance()->reportQmlFrame()) {
+        QmlConfigProxy::notifyWaveformAverageFrameRateChanged();
+    }
+#endif
+#if defined(Q_OS_ANDROID)
+    if (m_perfSession && s_pfnReportActualWorkDuration) {
+        auto lastFrameDurationNs = m_frameTimer.elapsed().toIntegerNanos();
+        s_pfnReportActualWorkDuration(m_perfSession, lastFrameDurationNs);
+        m_frameTimer.restart();
+    }
+#endif
+}
+
+QmlApplication::~QmlApplication() {
+    QmlApplicationProxy::registerReloadCallback({});
+    // Destroy the QML engine before the waveform factory. Scene-graph nodes
+    // owned by the engine may still reference QML waveform renderers and the
+    // factory while the engine is tearing down its object tree.
+    m_pAppEngine.reset();
+    // Delete all the QML singletons in order to prevent leak detection in CoreService
+    QmlRecordingProxy::s_pRecordingManager.reset();
+    QmlDlgPreferencesProxy::s_pInstance.reset();
+    if (m_ownsWaveformWidgetFactory) {
+        WaveformWidgetFactory::destroy();
+    }
+#ifdef MIXXX_USE_QML
+    WaveformWidgetFactory::setQmlMode(false);
+#endif
+    m_visualsManager.reset();
+    QmlApplicationProxy::registerVinylControlManager(nullptr);
+    m_xzColorFxControls.clear();
+    m_pCoreServices.reset();
+}
+
+// XZ Companion: Color FX control bridge adapted from Vynix DJ (GPL-2.0).
+// One EffectsManager, one QuickEffectChain per deck; NO second audio engine.
+void QmlApplication::setupXZColorFx() {
+    struct ColorFx {
+        QString effectId;
+        QList<std::pair<QString, double>> parameters;
+    };
+    const QList<ColorFx> kColorFx = {
+            {FilterEffect::getId(), {}},
+            {ReverbEffect::getId(), {{QStringLiteral("decay"), 0.7}}},
+            {EchoEffect::getId(),
+                    {{QStringLiteral("delay_time"), 0.75},
+                            {QStringLiteral("feedback_amount"), 0.8}}},
+            {MoogLadder4FilterEffect::getId(), {{QStringLiteral("resonance"), 3.0}}},
+            {WhiteNoiseEffect::getId(), {}},
+            {BitCrusherEffect::getId(), {}},
+    };
+
+    auto pEffectsManager = m_pCoreServices->getEffectsManager();
+    if (!pEffectsManager) {
+        qWarning() << "XZ Color FX: EffectsManager not available";
+        return;
+    }
+    const std::weak_ptr<EffectsManager> pWeakEffectsManager = pEffectsManager;
+    auto pCurrent = std::make_unique<ControlObject>(
+            ConfigKey(QStringLiteral("[Skin]"), QStringLiteral("color_fx_current")));
+    ControlObject* pCurrentRaw = pCurrent.get();
+    m_xzColorFxControls.push_back(std::move(pCurrent));
+
+    QStringList ids;
+    for (const auto& item : kColorFx) {
+        ids.push_back(item.effectId);
+    }
+    const QuickEffectChainPointer firstChain = pEffectsManager->getQuickEffectChain(
+            PlayerManager::groupForDeck(0));
+    const EffectSlotPointer firstSlot = firstChain ? firstChain->getEffectSlot(0) : EffectSlotPointer();
+    if (firstSlot) {
+        const QWeakPointer<EffectSlot> weakFirst = firstSlot;
+        const auto updateSelected = [weakFirst, ids, pCurrentRaw]() {
+            const auto slot = weakFirst.toStrongRef();
+            const auto manifest = slot ? slot->getManifest() : nullptr;
+            pCurrentRaw->set(manifest ? static_cast<double>(ids.indexOf(manifest->id()) + 1) : 0.0);
+        };
+        connect(firstSlot.data(), &EffectSlot::effectChanged, this, updateSelected);
+        updateSelected();
+    }
+
+    for (int i = 0; i < static_cast<int>(kColorFx.size()); ++i) {
+        auto button = std::make_unique<ControlPushButton>(
+                ConfigKey(QStringLiteral("[Skin]"),
+                        QStringLiteral("color_fx_select_%1").arg(i + 1)));
+        const ColorFx colorFx = kColorFx.at(i);
+        connect(button.get(), &ControlObject::valueChanged, this,
+                [this, pWeakEffectsManager, colorFx](double value) {
+                    const auto manager = pWeakEffectsManager.lock();
+                    if (value <= 0 || !manager) {
+                        return;
+                    }
+                    const auto manifest = manager->getBackendManager()->getManifest(
+                            colorFx.effectId, EffectBackendType::BuiltIn);
+                    if (!manifest) {
+                        qWarning() << "XZ Color FX: effect is unavailable" << colorFx.effectId;
+                        return;
+                    }
+                    const auto deckCount = static_cast<int>(
+                            m_pCoreServices->getPlayerManager()->numberOfDecks());
+                    for (int deck = 0; deck < deckCount; ++deck) {
+                        const auto chain = manager->getQuickEffectChain(
+                                PlayerManager::groupForDeck(deck));
+                        const auto slot = chain ? chain->getEffectSlot(0) : EffectSlotPointer();
+                        if (!slot) {
+                            continue;
+                        }
+                        slot->loadEffectWithDefaults(manifest);
+                        const int knobCount = static_cast<int>(
+                                slot->numParameters(EffectParameterType::Knob));
+                        for (int parameter = 0; parameter < knobCount; ++parameter) {
+                            const auto parameterSlot = slot->getEffectParameterSlot(
+                                    EffectParameterType::Knob, parameter);
+                            if (!parameterSlot || !parameterSlot->isLoaded()) {
+                                continue;
+                            }
+                            const auto parameterManifest = parameterSlot->getManifest();
+                            const QString key = QStringLiteral("parameter%1").arg(parameter + 1);
+                            if (parameterManifest->defaultLinkType() ==
+                                    EffectManifestParameter::LinkType::Linked) {
+                                ControlObject::set(
+                                        ConfigKey(slot->getGroup(), key + QStringLiteral("_link_type")),
+                                        static_cast<double>(
+                                                EffectManifestParameter::LinkType::LinkedLeftRight));
+                            }
+                            for (const auto& [id, parameterValue] : colorFx.parameters) {
+                                if (parameterManifest->id() == id) {
+                                    ControlObject::set(
+                                            ConfigKey(slot->getGroup(), key), parameterValue);
+                                }
+                            }
+                        }
+                        chain->setSuperParameter(chain->getSuperParameter(), true);
+                    }
+                });
+        m_xzColorFxControls.push_back(std::move(button));
+    }
+}
+
+void QmlApplication::setupSpinnyCoverControls() {
+    m_pShowSpinny = make_parented<ControlProxy>("[Skin]", "show_spinnies", this);
+    m_pShowCover = make_parented<ControlProxy>("[Skin]", "show_coverart", this);
+    m_pSelectBigSpinnyCover = std::make_unique<ControlPushButton>(
+            ConfigKey("[Skin]", "select_big_spinny_or_cover"), true);
+    m_pSelectBigSpinnyCover->setButtonMode(mixxx::control::ButtonMode::Toggle);
+
+    m_pShowSpinnyAndOrCover = std::make_unique<ControlPushButton>(
+            ConfigKey("[Skin]", "show_spinny_or_cover"));
+    m_pShowSpinnyAndOrCover->setButtonMode(mixxx::control::ButtonMode::Toggle);
+    m_pShowSpinnyAndOrCover->setReadOnly();
+
+    m_pShowSmallSpinnyCover = std::make_unique<ControlPushButton>(
+            ConfigKey("[Skin]", "show_small_spinny_or_cover"));
+    m_pShowSmallSpinnyCover->setButtonMode(mixxx::control::ButtonMode::Toggle);
+    m_pShowSmallSpinnyCover->setReadOnly();
+
+    m_pShowBigSpinnyCover = std::make_unique<ControlPushButton>(
+            ConfigKey("[Skin]", "show_big_spinny_or_cover"));
+    m_pShowBigSpinnyCover->setButtonMode(mixxx::control::ButtonMode::Toggle);
+    m_pShowBigSpinnyCover->setReadOnly();
+
+    m_pShowSpinny->connectValueChanged(this, &QmlApplication::updateSpinnyCoverControls);
+    m_pShowCover->connectValueChanged(this, &QmlApplication::updateSpinnyCoverControls);
+    connect(m_pSelectBigSpinnyCover.get(),
+            &ControlObject::valueChanged,
+            this,
+            &QmlApplication::updateSpinnyCoverControls);
+
+    updateSpinnyCoverControls();
+}
+
+void QmlApplication::updateSpinnyCoverControls() {
+    m_pShowSpinnyAndOrCover->setAndConfirm(
+            (m_pShowSpinny->toBool() || m_pShowCover->toBool()) ? 1.0 : 0.0);
+    m_pShowSmallSpinnyCover->setAndConfirm(
+            (m_pShowSpinnyAndOrCover->toBool() && !m_pSelectBigSpinnyCover->toBool())
+                    ? 1.0
+                    : 0.0);
+    m_pShowBigSpinnyCover->setAndConfirm(
+            (m_pShowSpinnyAndOrCover->toBool() && m_pSelectBigSpinnyCover->toBool())
+                    ? 1.0
+                    : 0.0);
+}
+
+bool QmlApplication::loadQml(const QString& path) {
+    // QQmlApplicationEngine::load creates a new window but also leaves the old one,
+    // so it is necessary to destroy the old QQmlApplicationEngine and create a new one.
+    m_pAppEngine = std::make_unique<QQmlApplicationEngine>();
+    m_pAppEngine->setUiLanguage(QLocale().name());
+
+    m_autoReload.clear();
+    m_pAppEngine->addUrlInterceptor(&m_autoReload);
+    m_pAppEngine->addImportPath(QStringLiteral(":/mixxx.org/imports"));
+
+    registerImageProvider();
+
+    connect(m_pAppEngine.get(), &QQmlEngine::warnings, [](const QList<QQmlError>& warnings) {
+        for (const auto& w : warnings) {
+            qCritical() << "QML Error:" << w.toString();
+        }
+    });
+
+    qInfo() << "Attempting to load QML file:" << path;
+    m_pAppEngine->load(path);
+    const auto rootObjects = m_pAppEngine->rootObjects();
+    if (rootObjects.isEmpty()) {
+        qCritical() << "Failed to load QML file" << path << "exists:" << QFile::exists(path);
+        m_pAppEngine.reset();
+        return false;
+    }
+
+    for (auto* item : rootObjects) {
+        auto* pWindow = qobject_cast<QQuickWindow*>(item);
+        if (!pWindow) {
+            continue;
+        }
+        slotWindowChanged(pWindow);
+        break;
+    }
+    return true;
+}
+
+void QmlApplication::registerImageProvider() {
+    if (!m_pAppEngine) {
+        return;
+    }
+
+    const auto pTrackCollectionManager = m_pCoreServices->getTrackCollectionManager();
+    if (!pTrackCollectionManager) {
+        return;
+    }
+
+    auto* pImageProvider = new AsyncImageProvider(pTrackCollectionManager);
+    m_pAppEngine->addImageProvider(AsyncImageProvider::kProviderName, pImageProvider);
+}
+
+} // namespace qml
+} // namespace mixxx

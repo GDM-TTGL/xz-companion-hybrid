@@ -1,0 +1,47 @@
+<!--
+  Tempo strip of one deck on the MIXER page (mixer.xml), next to its
+  channel fader: pitch in % on top, the vertical tempo fader and a reset
+  to 0 % below. The BPM is next to the track title (mixer_deck_header.xml).
+  Variables:
+    channel: deck number
+-->
+<Template>
+  <SetVariable name="Group">[Channel<Variable name="channel"/>]</SetVariable>
+  <WidgetGroup>
+    <ObjectName>MixerTempo</ObjectName>
+    <Layout>vertical</Layout>
+    <Size>64f,0me</Size>
+    <Children>
+      <NumberRate>
+        <ObjectName>MixerTempoValue</ObjectName>
+        <Channel><Variable name="channel"/></Channel>
+        <NumberOfDigits>1</NumberOfDigits>
+        <Size>0me,26f</Size>
+        <Alignment>center</Alignment>
+      </NumberRate>
+      <SliderComposed>
+        <ObjectName>MixerFader</ObjectName>
+        <SizePolicy>me,me</SizePolicy>
+        <Slider scalemode="STRETCH">icons/mixer_groove_v.svg</Slider>
+        <Handle scalemode="STRETCH_ASPECT">icons/mixer_handle_tempo.svg</Handle>
+        <Horizontal>false</Horizontal>
+        <Connection>
+          <ConfigKey><Variable name="Group"/>,rate</ConfigKey>
+        </Connection>
+      </SliderComposed>
+      <!-- ConnectValueToWidget is false because _set_default stays 1 while
+           the fader is at its default, see levels.xml -->
+      <PushButton>
+        <ObjectName>MixerTempoReset</ObjectName>
+        <Size>0me,32f</Size>
+        <NumberStates>1</NumberStates>
+        <State><Number>0</Number><Text>0 %</Text></State>
+        <Connection>
+          <ConfigKey><Variable name="Group"/>,rate_set_default</ConfigKey>
+          <EmitOnDownPress>true</EmitOnDownPress>
+          <ConnectValueToWidget>false</ConnectValueToWidget>
+        </Connection>
+      </PushButton>
+    </Children>
+  </WidgetGroup>
+</Template>
