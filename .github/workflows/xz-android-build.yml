@@ -259,9 +259,22 @@ jobs:
 
       - name: Build Mixxx Android target (APK)
         run: |
-          echo "===> Compilando Mixxx y generando paquete Android..."
+          set -o pipefail
+          echo "===> Compilando Mixxx..."
           cd build
-          cmake --build . --config RelWithDebInfo --parallel $(nproc) 2>&1 | tee build_output.log
+          cmake --build . --config RelWithDebInfo --parallel "$(nproc)" 2>&1 | tee build_output.log
+
+          echo "===> Verificando y ejecutando target de empaquetado APK..."
+          if cmake --build . --target help 2>/dev/null | grep -qE "(^|[[:space:]])apk([[:space:]]|$)"; then
+            echo "Ejecutando target explicito: apk"
+            cmake --build . --target apk 2>&1 | tee -a build_output.log
+          elif cmake --build . --target help 2>/dev/null | grep -qE "(^|[[:space:]])mixxx_make_apk([[:space:]]|$)"; then
+            echo "Ejecutando target explicito: mixxx_make_apk"
+            cmake --build . --target mixxx_make_apk 2>&1 | tee -a build_output.log
+          elif cmake --build . --target help 2>/dev/null | grep -qE "(^|[[:space:]])mixxx_apk([[:space:]]|$)"; then
+            echo "Ejecutando target explicito: mixxx_apk"
+            cmake --build . --target mixxx_apk 2>&1 | tee -a build_output.log
+          fi
 
       - name: Package and sign APK
         if: success()

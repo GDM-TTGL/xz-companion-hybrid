@@ -14,12 +14,6 @@
 #include <utility>
 
 #include "control/control.h"
-#include "effects/backends/builtin/bitcrushereffect.h"
-#include "effects/backends/builtin/echoeffect.h"
-#include "effects/backends/builtin/filtereffect.h"
-#include "effects/backends/builtin/moogladder4filtereffect.h"
-#include "effects/backends/builtin/reverbeffect.h"
-#include "effects/backends/builtin/whitenoiseeffect.h"
 #include "effects/backends/effectsbackendmanager.h"
 #include "effects/chains/quickeffectchain.h"
 #include "effects/effectparameterslotbase.h"
@@ -470,14 +464,16 @@ void QmlApplication::setupXZColorFx() {
         QList<std::pair<QString, double>> parameters;
     };
     const QList<ColorFx> kColorFx = {
-            {FilterEffect::getId(), {}},
-            {ReverbEffect::getId(), {{QStringLiteral("decay"), 0.7}}},
-            {EchoEffect::getId(),
+            {QStringLiteral("org.mixxx.effects.filter"), {}},
+            {QStringLiteral("org.mixxx.effects.reverb"),
+                    {{QStringLiteral("decay"), 0.7}}},
+            {QStringLiteral("org.mixxx.effects.echo"),
                     {{QStringLiteral("delay_time"), 0.75},
                             {QStringLiteral("feedback_amount"), 0.8}}},
-            {MoogLadder4FilterEffect::getId(), {{QStringLiteral("resonance"), 3.0}}},
-            {WhiteNoiseEffect::getId(), {}},
-            {BitCrusherEffect::getId(), {}},
+            {QStringLiteral("org.mixxx.effects.moogladder4filter"),
+                    {{QStringLiteral("resonance"), 3.0}}},
+            {QStringLiteral("org.mixxx.effects.whitenoise"), {}},
+            {QStringLiteral("org.mixxx.effects.bitcrusher"), {}},
     };
 
     auto pEffectsManager = m_pCoreServices->getEffectsManager();
